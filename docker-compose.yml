@@ -1,0 +1,52 @@
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: globapay
+      POSTGRES_PASSWORD: globapay
+      POSTGRES_DB: globapay
+    ports:
+      - "5432:5432"
+    volumes:
+      - globapay_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U globapay"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - globapay_redis_data:/data
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://globapay:globapay@postgres:5432/globapay?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "4000:4000"
+    volumes:
+      - globapay_uploads:/app/uploads
+    command: sh -c "npx prisma migrate deploy && node dist/src/main.js"
+
+volumes:
+  globapay_postgres_data:
+  globapay_redis_data:
+  globapay_uploads:

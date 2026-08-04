@@ -1,0 +1,1093 @@
+// GlobaPay — Phase 1 data model
+// Covers: identity, RBAC, device/session management, multi-currency wallets
+// with a double-entry-style ledger, OTP, password reset, and audit logging.
+//
+// Currencies (fiat AND crypto) are rows, not enum values, so new assets can
+// be added by inserting data — no schema migration or code change required.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & RBAC
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  BLOCKED
+  CLOSED
+}
+
+model User {
+  id                String    @id @default(uuid())
+  email             String?   @unique
+  phone             String?   @unique
+  passwordHash      String
+  firstName         String
+  lastName          String
+  status            UserStatus @default(PENDING_VERIFICATION)
+  emailVerifiedAt   DateTime?
+  phoneVerifiedAt   DateTime?
+  twoFactorEnabled  Boolean   @default(false)
+  twoFactorSecret   String?
+  pinHash           String?
+  kycTier           Int       @default(0)
+  country           String    @default("NG")
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  roles             UserRole[]
+  wallets           Wallet[]
+  devices           Device[]
+  sessions          Session[]
+  refreshTokens     RefreshToken[]
+  otpCodes          OtpCode[]
+  passwordResets    PasswordResetToken[]
+  auditLogs         AuditLog[]
+  beneficiaries     Beneficiary[]
+  transfers         Transfer[]
+  orders            Order[]
+  watchlistItems    WatchlistItem[]
+  priceAlerts       PriceAlert[]
+  kycSubmissions    KycSubmission[]
+  reviewedKycSubmissions KycSubmission[] @relation("kycReviewer")
+  p2pOffers         P2POffer[]
+  p2pOrdersAsBuyer  P2POrder[] @relation("p2pBuyer")
+  p2pOrdersAsSeller P2POrder[] @relation("p2pSeller")
+  p2pReviewsGiven   P2PReview[] @relation("p2pReviewer")
+  p2pReviewsReceived P2PReview[] @relation("p2pReviewee")
+  virtualCards      VirtualCard[]
+  merchantAccount   MerchantAccount?
+  aiConversations   AiConversation[]
+  budgets           Budget[]
+  fraudAlerts       FraudAlert[]
+  resolvedFraudAlerts FraudAlert[] @relation("fraudAlertResolver")
+  suspendedUsers    UserStatusChange[] @relation("statusChangedByAdmin")
+  statusChanges     UserStatusChange[] @relation("statusChangeTarget")
+
+  @@index([status])
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // INDIVIDUAL, BUSINESS, MERCHANT, CRYPTO_TRADER,
+                                // GIFT_CARD_TRADER, DIASPORA_USER, SUPPORT_AGENT,
+                                // COMPLIANCE_OFFICER, FINANCE_MANAGER, ADMIN, SUPER_ADMIN
+  description String?
+  isSystem    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  name        String   @unique // e.g. "wallet:read", "kyc:review", "user:manage"
+  description String?
+
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+// ---------------------------------------------------------------------------
+// Devices & sessions
+// ---------------------------------------------------------------------------
+
+model Device {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId   String   // stable client fingerprint hash
+  name       String?
+  platform   String?
+  userAgent  String?
+  ipAddress  String?
+  isTrusted  Boolean  @default(false)
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  sessions   Session[]
+
+  @@unique([userId, deviceId])
+}
+
+model RefreshToken {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash         String   @unique
+  isRevoked         Boolean  @default(false)
+  replacedByTokenId String?
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+
+  session           Session?
+}
+
+model Session {
+  id             String        @id @default(uuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId       String?
+  device         Device?       @relation(fields: [deviceId], references: [id])
+  refreshTokenId String?       @unique
+  refreshToken   RefreshToken? @relation(fields: [refreshTokenId], references: [id])
+  ipAddress      String?
+  userAgent      String?
+  isRevoked      Boolean       @default(false)
+  expiresAt      DateTime
+  createdAt      DateTime      @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// OTP / password reset
+// ---------------------------------------------------------------------------
+
+enum OtpPurpose {
+  EMAIL_VERIFICATION
+  PHONE_VERIFICATION
+  LOGIN_2FA
+  PASSWORD_RESET
+  PIN_RESET
+  TRANSACTION_CONFIRM
+}
+
+enum OtpChannel {
+  EMAIL
+  SMS
+  WHATSAPP
+  AUTHENTICATOR
+}
+
+model OtpCode {
+  id          String     @id @default(uuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash    String
+  purpose     OtpPurpose
+  channel     OtpChannel
+  destination String     // masked email/phone the code was sent to
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  isUsed      Boolean    @default(false)
+  expiresAt   DateTime
+  createdAt   DateTime   @default(now())
+
+  @@index([userId, purpose])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  isUsed    Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Currencies & wallets
+// ---------------------------------------------------------------------------
+
+enum CurrencyType {
+  FIAT
+  CRYPTO
+}
+
+model Currency {
+  id        String       @id @default(uuid())
+  code      String       @unique // USD, GBP, EUR, CAD, NGN, AUD, BTC, ETH, USDT...
+  name      String
+  symbol    String
+  type      CurrencyType
+  decimals  Int          @default(2)
+  isActive  Boolean      @default(true)
+  createdAt DateTime     @default(now())
+
+  wallets   Wallet[]
+}
+
+enum WalletStatus {
+  ACTIVE
+  FROZEN
+  CLOSED
+}
+
+model Wallet {
+  id             String       @id @default(uuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currencyId     String
+  currency       Currency     @relation(fields: [currencyId], references: [id])
+  balance        Decimal      @default(0) @db.Decimal(36, 18)
+  frozenBalance  Decimal      @default(0) @db.Decimal(36, 18)
+  pendingBalance Decimal      @default(0) @db.Decimal(36, 18)
+  status         WalletStatus @default(ACTIVE)
+  isPrimary      Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  ledgerEntries  LedgerEntry[]
+  outgoingTransfers Transfer[] @relation("sourceWallet")
+  incomingTransfers Transfer[] @relation("destinationWallet")
+  depositAddress DepositAddress?
+  virtualCards   VirtualCard[]
+
+  @@unique([userId, currencyId])
+}
+
+enum LedgerEntryType {
+  CREDIT
+  DEBIT
+}
+
+model LedgerEntry {
+  id           String          @id @default(uuid())
+  walletId     String
+  wallet       Wallet          @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  type         LedgerEntryType
+  amount       Decimal         @db.Decimal(36, 18)
+  balanceAfter Decimal         @db.Decimal(36, 18)
+  reference    String          @unique
+  description  String
+  metadata     Json?
+  createdAt    DateTime        @default(now())
+
+  @@index([walletId])
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  entity    String?
+  entityId  String?
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Beneficiaries, FX rates, fees, and transfers
+// ---------------------------------------------------------------------------
+
+enum BeneficiaryType {
+  GLOBAPAY_USER
+  BANK_ACCOUNT
+}
+
+model Beneficiary {
+  id                String          @id @default(uuid())
+  userId            String
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              BeneficiaryType
+  label             String          // nickname the owner gave this beneficiary
+  isFavorite        Boolean         @default(false)
+
+  // Populated when type = GLOBAPAY_USER
+  beneficiaryUserId String?
+  beneficiaryTag    String?         // email/phone snapshot at time of saving
+
+  // Populated when type = BANK_ACCOUNT
+  bankName          String?
+  accountNumber     String?
+  accountName       String?
+  bankCountry       String?
+  currencyCode      String?
+  swiftBic          String?         // SWIFT
+  routingNumber     String?         // ACH (US)
+  iban              String?         // SEPA (EU)
+  sortCode          String?         // Faster Payments (UK)
+
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  transfers         Transfer[]
+
+  @@index([userId])
+}
+
+// Exchange rates are data, refreshed by a provider integration in a later
+// phase — the FX module reads through this table so quoting logic never
+// changes when the upstream rate source does.
+model ExchangeRate {
+  id              String   @id @default(uuid())
+  baseCurrencyId  String
+  quoteCurrencyId String
+  rate            Decimal  @db.Decimal(24, 10) // 1 unit of base = `rate` units of quote
+  source          String   @default("internal")
+  fetchedAt       DateTime @default(now())
+
+  @@unique([baseCurrencyId, quoteCurrencyId])
+}
+
+enum TransferType {
+  WALLET_TO_WALLET
+  CURRENCY_CONVERSION
+  LOCAL_BANK
+  INTERNATIONAL_BANK
+}
+
+// A fee schedule row. `currencyCode` and `rail` of null mean "applies to all" —
+// the fee engine picks the most specific matching rule.
+model FeeRule {
+  id             String        @id @default(uuid())
+  transferType   TransferType
+  rail           TransferRail?
+  currencyCode   String?
+  percentageFee  Decimal       @default(0) @db.Decimal(7, 5) // e.g. 0.00500 = 0.5%
+  flatFee        Decimal       @default(0) @db.Decimal(18, 8)
+  minFee         Decimal       @default(0) @db.Decimal(18, 8)
+  maxFee         Decimal?      @db.Decimal(18, 8)
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+}
+
+enum TransferRail {
+  INTERNAL         // wallet-to-wallet within GlobaPay
+  LOCAL_INSTANT    // e.g. Nigeria NIP-style instant local rail
+  SWIFT
+  ACH
+  SEPA
+  FASTER_PAYMENTS
+}
+
+enum TransferStatus {
+  SCHEDULED
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model Transfer {
+  id                      String          @id @default(uuid())
+  reference               String          @unique
+  userId                  String
+  user                    User            @relation(fields: [userId], references: [id])
+  type                    TransferType
+  rail                    TransferRail
+  status                  TransferStatus  @default(PENDING)
+
+  sourceWalletId          String
+  sourceWallet            Wallet          @relation("sourceWallet", fields: [sourceWalletId], references: [id])
+  destinationWalletId     String?
+  destinationWallet       Wallet?         @relation("destinationWallet", fields: [destinationWalletId], references: [id])
+  beneficiaryId           String?
+  beneficiary             Beneficiary?    @relation(fields: [beneficiaryId], references: [id])
+
+  sourceAmount            Decimal         @db.Decimal(36, 18)
+  sourceCurrencyCode      String
+  destinationAmount       Decimal         @db.Decimal(36, 18)
+  destinationCurrencyCode String
+  exchangeRate            Decimal?        @db.Decimal(24, 10)
+  feeAmount               Decimal         @default(0) @db.Decimal(36, 18)
+  totalDebit              Decimal         @db.Decimal(36, 18) // sourceAmount + feeAmount
+
+  narration               String?
+  category                String?         // rule-based expense category, set at creation — see CategorizationService
+  providerReference       String?         // mock/real rail's own tracking id
+  scheduledFor            DateTime?
+  failureReason           String?
+  completedAt             DateTime?
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+
+  recurrence              RecurrenceRule?
+
+  @@index([userId])
+  @@index([status])
+}
+
+enum RecurrenceFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+// A recurring transfer is modelled as one "template" Transfer (status
+// SCHEDULED, never itself settled) plus a RecurrenceRule that a scheduler
+// reads to spawn a fresh, real Transfer on each run.
+model RecurrenceRule {
+  id          String              @id @default(uuid())
+  transferId  String              @unique
+  transfer    Transfer            @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  frequency   RecurrenceFrequency
+  nextRunAt   DateTime
+  endsAt      DateTime?
+  isActive    Boolean             @default(true)
+  createdAt   DateTime            @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Crypto trading (orders, watchlists, price alerts, deposit addresses)
+// ---------------------------------------------------------------------------
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+  STOP
+}
+
+enum OrderStatus {
+  OPEN       // LIMIT/STOP only — waiting for the trigger price
+  FILLED
+  CANCELLED
+  EXPIRED
+}
+
+// GlobaPay is the principal counterparty on every trade (the same model
+// Coinbase/Binance "simple buy/sell" use) rather than matching two users'
+// orders against each other — there's no real external liquidity source
+// behind this yet, so `filledPrice` is simply the quoted rate from FxService
+// at execution time. Swapping in real market-maker/exchange liquidity later
+// only touches the execution step, not the Order model or history.
+model Order {
+  id                String      @id @default(uuid())
+  reference         String      @unique
+  userId            String
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  side              OrderSide
+  type              OrderType
+  status            OrderStatus @default(OPEN)
+
+  baseCurrencyCode  String      // the crypto asset being bought/sold, e.g. BTC
+  quoteCurrencyCode String      // what it's priced/paid in, e.g. USDT or USD
+  quantity          Decimal     @db.Decimal(36, 18) // amount of baseCurrency
+
+  triggerPrice      Decimal?    @db.Decimal(24, 10) // LIMIT: fill at/better; STOP: fill once reached
+  filledPrice        Decimal?   @db.Decimal(24, 10)
+  filledQuoteAmount  Decimal?   @db.Decimal(36, 18)
+  feeAmount          Decimal    @default(0) @db.Decimal(36, 18)
+
+  createdAt         DateTime    @default(now())
+  filledAt          DateTime?
+  cancelledAt        DateTime?
+  expiresAt          DateTime?
+
+  @@index([userId])
+  @@index([status])
+}
+
+model WatchlistItem {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currencyCode String
+  createdAt    DateTime @default(now())
+
+  @@unique([userId, currencyCode])
+}
+
+enum AlertDirection {
+  ABOVE
+  BELOW
+}
+
+model PriceAlert {
+  id           String         @id @default(uuid())
+  userId       String
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currencyCode String
+  quoteCurrencyCode String    @default("USDT")
+  direction    AlertDirection
+  targetPrice  Decimal        @db.Decimal(24, 10)
+  isTriggered  Boolean        @default(false)
+  triggeredAt  DateTime?
+  createdAt    DateTime       @default(now())
+
+  @@index([userId])
+  @@index([isTriggered])
+}
+
+// Demo-grade placeholder only — NOT a real blockchain address or wallet.
+// Generating and custodying real keys needs an HSM-backed signing service
+// and a security review before it touches real funds; this exists purely so
+// the deposit-flow UI has something to display in this phase.
+model DepositAddress {
+  id        String   @id @default(uuid())
+  walletId  String   @unique
+  wallet    Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  network   String   // e.g. "Bitcoin", "Ethereum (ERC-20)", "Tron (TRC-20)"
+  address   String   @unique
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 — KYC tiers & compliance review
+//
+// IMPORTANT: ScreeningService's AML/sanctions/PEP checks are a MOCK — a
+// deterministic name/keyword match against a small hardcoded list, purely to
+// give the review queue and risk score something to work with. This is NOT
+// connected to OFAC, UN, or any licensed sanctions/PEP data provider, and
+// must not be treated as real compliance coverage. BVN/NIN fields are stored
+// as submitted, not verified against Nigeria's actual BVN/NIN registries —
+// that needs a licensed identity-verification provider (e.g. Smile ID,
+// Youverify, Dojah). Wiring in real providers replaces ScreeningService's
+// internals; the submission/review/document model around it stays the same.
+// ---------------------------------------------------------------------------
+
+enum KycSubmissionStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  NEEDS_MORE_INFO
+}
+
+enum KycDocumentType {
+  SELFIE
+  PASSPORT
+  DRIVERS_LICENSE
+  NATIONAL_ID
+  PROOF_OF_ADDRESS
+  CAC_CERTIFICATE
+  TAX_ID_DOCUMENT
+  COMPANY_DOCUMENT
+}
+
+enum KycDocumentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model KycSubmission {
+  id             String              @id @default(uuid())
+  userId         String
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetTier     Int                 // 1, 2, or 3
+  status         KycSubmissionStatus @default(PENDING)
+
+  // Tier 1 — Nigeria-specific identity numbers (as submitted, not verified — see note above)
+  bvn            String?
+  nin            String?
+
+  // Tier 2 — address, backing a proof-of-address document
+  addressLine1   String?
+  addressLine2   String?
+  city           String?
+  state          String?
+  postalCode     String?
+  country        String?
+
+  // Tier 3 — business
+  businessName        String?
+  registrationNumber  String? // CAC number
+  taxId               String?
+  directors           Json?   // [{ fullName, role, idNumber }]
+
+  // Automated screening output (mock — see file header)
+  riskScore      Int?     // 0-100, higher = riskier
+  amlFlag        Boolean  @default(false)
+  sanctionsFlag  Boolean  @default(false)
+  pepFlag        Boolean  @default(false)
+  screeningNotes String?
+
+  reviewedById   String?
+  reviewedBy     User?    @relation("kycReviewer", fields: [reviewedById], references: [id])
+  reviewNote     String?
+  reviewedAt     DateTime?
+
+  submittedAt    DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  documents      KycDocument[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model KycDocument {
+  id              String            @id @default(uuid())
+  submissionId    String
+  submission      KycSubmission     @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  type            KycDocumentType
+  status          KycDocumentStatus @default(PENDING)
+  fileName        String
+  storagePath     String            // local disk path in this build — swap for an S3-compatible key in production
+  mimeType        String
+  fileSizeBytes   Int
+  reviewNote      String?
+  createdAt       DateTime          @default(now())
+
+  @@index([submissionId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5a — P2P marketplace & escrow
+//
+// Scope note: offers are sell-side only (a seller lists crypto or a gift
+// card; buyers fulfill it) — there's no separate buy-offer matching engine.
+// Crypto orders settle instantly and atomically through the platform (both
+// legs are programmatically guaranteed, so there's nothing to dispute).
+// Gift card orders use real escrow — via the seller's own frozenBalance —
+// because a card's code/validity genuinely can't be verified until the
+// buyer checks it, so a delivery-confirm-or-dispute step is the honest model.
+// ---------------------------------------------------------------------------
+
+enum P2PAssetType {
+  CRYPTO
+  GIFT_CARD
+}
+
+enum P2POfferStatus {
+  ACTIVE
+  PAUSED
+  CLOSED
+}
+
+model P2POffer {
+  id                String         @id @default(uuid())
+  sellerId          String
+  seller            User           @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  assetType         P2PAssetType
+  assetCode         String         // crypto currency code, or a gift card brand key e.g. "AMAZON_USD"
+  quoteCurrencyCode String         // what the buyer pays in
+  pricePerUnit      Decimal        @db.Decimal(24, 10)
+  availableQuantity Decimal        @db.Decimal(36, 18)
+  minOrderQuantity  Decimal        @db.Decimal(36, 18)
+  maxOrderQuantity  Decimal        @db.Decimal(36, 18)
+  status            P2POfferStatus @default(ACTIVE)
+  terms             String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  orders            P2POrder[]
+
+  @@index([sellerId])
+  @@index([assetType, status])
+}
+
+enum P2POrderStatus {
+  PENDING_DELIVERY // gift cards only — escrow held, waiting on the seller to deliver the code
+  DELIVERED        // gift cards only — code delivered, waiting on buyer confirmation
+  COMPLETED
+  DISPUTED
+  CANCELLED
+}
+
+enum DisputeResolution {
+  BUYER
+  SELLER
+}
+
+model P2POrder {
+  id                String         @id @default(uuid())
+  reference         String         @unique
+  offerId           String
+  offer             P2POffer       @relation(fields: [offerId], references: [id])
+  buyerId           String
+  buyer             User           @relation("p2pBuyer", fields: [buyerId], references: [id])
+  sellerId          String
+  seller            User           @relation("p2pSeller", fields: [sellerId], references: [id])
+
+  assetType         P2PAssetType
+  assetCode         String
+  quantity          Decimal        @db.Decimal(36, 18)
+  pricePerUnit      Decimal        @db.Decimal(24, 10)
+  totalAmount       Decimal        @db.Decimal(36, 18)
+  quoteCurrencyCode String
+  status            P2POrderStatus
+
+  giftCardCode      String?        // set by the seller once delivered; only ever returned to the buyer or the seller
+  deliveredAt       DateTime?
+  completedAt       DateTime?
+  cancelledAt       DateTime?
+
+  disputeReason     String?
+  disputeRaisedById String?
+  disputeResolution DisputeResolution?
+  disputeNote       String?
+  disputeResolvedById String?
+  disputeResolvedAt DateTime?
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  review            P2PReview?
+  giftCardValidation GiftCardValidation?
+
+  @@index([buyerId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+model P2PReview {
+  id         String   @id @default(uuid())
+  orderId    String   @unique
+  order      P2POrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  reviewerId String
+  reviewer   User     @relation("p2pReviewer", fields: [reviewerId], references: [id])
+  revieweeId String
+  reviewee   User     @relation("p2pReviewee", fields: [revieweeId], references: [id])
+  rating     Int      // 1-5
+  comment    String?
+  createdAt  DateTime @default(now())
+
+  @@index([revieweeId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5b — Virtual cards
+//
+// This is a spending-control record linked to a wallet, NOT a real payment
+// card: no full PAN, no CVV, no card-network integration is generated or
+// stored anywhere. Issuing an actually usable virtual card requires a
+// licensed card-issuing partner (e.g. Marqeta, Stripe Issuing, a local
+// processor) — deliberately out of scope here, same as the deposit-address
+// and bank-provider mocks in earlier phases.
+// ---------------------------------------------------------------------------
+
+enum CardStatus {
+  ACTIVE
+  FROZEN
+  TERMINATED
+}
+
+enum CardBrand {
+  VERVE
+  MASTERCARD
+}
+
+model VirtualCard {
+  id                  String     @id @default(uuid())
+  userId              String
+  user                User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  walletId            String     // the fiat wallet this card spends from
+  wallet              Wallet     @relation(fields: [walletId], references: [id])
+  label               String
+  brand               CardBrand
+  last4               String
+  expiryMonth         Int
+  expiryYear          Int
+  status              CardStatus @default(ACTIVE)
+  spendingLimitAmount Decimal?   @db.Decimal(18, 2)
+  spendingLimitPeriod String?    // "DAILY" | "MONTHLY" | null
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  transactions        CardTransaction[]
+
+  @@index([userId])
+}
+
+enum CardTransactionStatus {
+  APPROVED
+  DECLINED
+}
+
+model CardTransaction {
+  id             String                 @id @default(uuid())
+  cardId         String
+  card           VirtualCard            @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  amount         Decimal                @db.Decimal(18, 2)
+  currencyCode   String
+  merchantName   String
+  status         CardTransactionStatus
+  declineReason  String?
+  createdAt      DateTime               @default(now())
+
+  @@index([cardId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5c — Merchant tools: payment links, invoices, checkout, webhooks
+// ---------------------------------------------------------------------------
+
+model MerchantAccount {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  businessName  String
+  walletId      String   // settlement wallet — where checkout proceeds land
+  apiKeyPrefix  String   // shown to the merchant, e.g. "gp_live_ab12"
+  apiKeyHash    String   // full key is only ever returned once, at creation
+  webhookUrl    String?
+  createdAt     DateTime @default(now())
+
+  paymentLinks  PaymentLink[]
+  invoices      Invoice[]
+  checkoutSessions CheckoutSession[]
+  webhookDeliveries WebhookDelivery[]
+}
+
+model PaymentLink {
+  id           String   @id @default(uuid())
+  merchantId   String
+  merchant     MerchantAccount @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  slug         String   @unique
+  title        String
+  description  String?
+  amount       Decimal  @db.Decimal(18, 2)
+  currencyCode String
+  isActive     Boolean  @default(true)
+  expiresAt    DateTime?
+  createdAt    DateTime @default(now())
+
+  checkoutSessions CheckoutSession[]
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  VOID
+}
+
+model Invoice {
+  id            String        @id @default(uuid())
+  merchantId    String
+  merchant      MerchantAccount @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  reference     String        @unique
+  customerName  String?
+  customerEmail String?
+  amount        Decimal       @db.Decimal(18, 2)
+  currencyCode  String
+  status        InvoiceStatus @default(DRAFT)
+  items         Json?         // [{ description, quantity, unitPrice }]
+  dueDate       DateTime?
+  createdAt     DateTime      @default(now())
+  paidAt        DateTime?
+
+  checkoutSessions CheckoutSession[]
+}
+
+enum CheckoutSessionStatus {
+  PENDING
+  COMPLETED
+  EXPIRED
+  CANCELLED
+}
+
+model CheckoutSession {
+  id            String   @id @default(uuid())
+  reference     String   @unique
+  merchantId    String
+  merchant      MerchantAccount @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  paymentLinkId String?
+  paymentLink   PaymentLink? @relation(fields: [paymentLinkId], references: [id])
+  invoiceId     String?
+  invoice       Invoice? @relation(fields: [invoiceId], references: [id])
+  amount        Decimal  @db.Decimal(18, 2)
+  currencyCode  String
+  status        CheckoutSessionStatus @default(PENDING)
+  payerUserId   String?
+  createdAt     DateTime @default(now())
+  completedAt   DateTime?
+}
+
+enum WebhookDeliveryStatus {
+  DELIVERED
+  FAILED
+}
+
+model WebhookDelivery {
+  id         String                 @id @default(uuid())
+  merchantId String
+  merchant   MerchantAccount        @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  event      String
+  payload    Json
+  status     WebhookDeliveryStatus
+  httpStatus Int?
+  createdAt  DateTime               @default(now())
+
+  @@index([merchantId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7a — AI financial assistant
+//
+// Uses direct OpenAI SDK tool-calling rather than LangChain/a vector DB: the
+// assistant's job here is answering questions grounded in the user's own
+// live transaction data (wallets, transfers, orders), not searching a
+// document corpus — a RAG/vector-search pipeline doesn't fit that shape.
+// LlmProviderService is the swap point if a different provider or an
+// agent-framework layer is wanted later. See AI_ASSISTANT.md for the
+// tradeoffs and what "voice assistant" (not built) would need.
+// ---------------------------------------------------------------------------
+
+enum AiRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+model AiConversation {
+  id        String      @id @default(uuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  messages  AiMessage[]
+
+  @@index([userId])
+}
+
+model AiMessage {
+  id             String         @id @default(uuid())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           AiRole
+  content        String
+  toolName       String?
+  toolCallId     String?
+  createdAt      DateTime       @default(now())
+
+  @@index([conversationId])
+}
+
+model Budget {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category     String
+  currencyCode String
+  monthlyLimit Decimal  @db.Decimal(18, 2)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, category, currencyCode])
+}
+
+enum FraudAlertSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum FraudAlertStatus {
+  OPEN
+  DISMISSED
+  CONFIRMED
+}
+
+// Heuristic, not ML — see FraudDetectionService for the exact rules. Flags
+// for the user's own awareness and for a compliance reviewer's queue; does
+// not block any transaction automatically.
+model FraudAlert {
+  id               String              @id @default(uuid())
+  userId           String
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  severity         FraudAlertSeverity
+  status           FraudAlertStatus    @default(OPEN)
+  reason           String
+  relatedEntityType String?            // e.g. "Transfer", "Order"
+  relatedEntityId  String?
+  resolvedById     String?
+  resolvedBy       User?               @relation("fraudAlertResolver", fields: [resolvedById], references: [id])
+  resolvedAt       DateTime?
+  createdAt        DateTime            @default(now())
+
+  @@index([userId])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7b — Gift card validation
+//
+// OCR/image analysis is a pluggable provider (OcrProviderService), mocked by
+// default — see the disclaimer in gift-card-validation.service.ts. Format
+// and duplicate-code checks are real, deterministic, and run regardless of
+// whether a real OCR provider is configured.
+// ---------------------------------------------------------------------------
+
+enum GiftCardValidationStatus {
+  PASSED
+  FLAGGED
+  REJECTED
+}
+
+model GiftCardValidation {
+  id                   String                   @id @default(uuid())
+  orderId              String                   @unique
+  order                P2POrder                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  codeHash             String                   // sha256 of the delivered code, for duplicate detection without storing plaintext twice
+  imagePath            String?
+  ocrExtractedText     String?
+  formatCheckPassed    Boolean
+  duplicateCheckPassed Boolean
+  riskScore            Int                      // 0-100
+  status               GiftCardValidationStatus
+  notes                String?
+  createdAt            DateTime                 @default(now())
+
+  @@index([codeHash])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7c — Broader admin dashboard
+// (AuditLog and FeeRule already existed — this adds feature flags and a
+// queryable record of admin-initiated account status changes.)
+// ---------------------------------------------------------------------------
+
+model FeatureFlag {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  isEnabled   Boolean  @default(false)
+  description String?
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+}
+
+model UserStatusChange {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation("statusChangeTarget", fields: [userId], references: [id], onDelete: Cascade)
+  fromStatus  String
+  toStatus    String
+  reason      String?
+  changedById String
+  changedBy   User     @relation("statusChangedByAdmin", fields: [changedById], references: [id])
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+}
