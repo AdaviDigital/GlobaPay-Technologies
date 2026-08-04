@@ -31,7 +31,10 @@ services:
 
   - type: redis
     name: globapay-redis
-    plan: starter          # use a valid Redis plan
+    plan: starter                # use a valid Redis plan
+    ipAllowList:
+    - source: 0.0.0.0/0
+      description: Allow all          
 
 databases:
   - name: globapay-postgres
