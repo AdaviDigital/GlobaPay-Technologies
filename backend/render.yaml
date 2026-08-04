@@ -3,7 +3,7 @@ services:
     name: globapay-api
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: basic-256mb
+    plan: basic
     healthCheckPath: /health
     
     envVars:
@@ -31,7 +31,7 @@ services:
 
   - type: redis
     name: globapay-redis
-    plan: basic-256mb
+    plan: basic
     ipAllowList: []
 
 databases:
