@@ -8,49 +8,87 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { validateEnv } from './config/validate-env';
 
+// Validate environment variables before starting the application
 validateEnv(process.env);
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, { cors: false });
+  try {
+    console.log('🚀 Starting GlobaPay API...');
 
-  // Render/Railway/most PaaS front the app with a single reverse-proxy hop.
-  // Without this, req.ip is always the proxy's address — ThrottlerGuard's
-  // per-IP rate limiting would then treat all traffic as one client (either
-  // blocking everyone together or not limiting anyone meaningfully).
-  app.set('trust proxy', 1);
+    const app = await NestFactory.create<NestExpressApplication>(
+      AppModule,
+      {
+        cors: false,
+      },
+    );
 
-  const configuredOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:3000')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
+    console.log('✅ Nest application created.');
 
-  app.enableCors({
-    origin: configuredOrigins,
-    credentials: true,
-  });
+    // Trust Render/Railway reverse proxy
+    app.set('trust proxy', 1);
 
-  app.use(helmet());
+    const configuredOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:3000')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean);
 
-  app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+    app.enableCors({
+      origin: configuredOrigins,
+      credentials: true,
+    });
 
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-      transformOptions: { enableImplicitConversion: true },
-    }),
-  );
+    app.use(helmet());
 
-  app.useGlobalFilters(new HttpExceptionFilter());
-  app.useGlobalInterceptors(new TransformInterceptor());
+    app.enableVersioning({
+      type: VersioningType.URI,
+      defaultVersion: '1',
+    });
 
-  app.setGlobalPrefix('api', { exclude: ['health'] });
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+        transformOptions: {
+          enableImplicitConversion: true,
+        },
+      }),
+    );
 
-  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
-  await app.listen(port, '0.0.0.0');
-  // eslint-disable-next-line no-console
-  console.log(`GlobaPay API listening on port ${port}`);
+    app.useGlobalFilters(new HttpExceptionFilter());
+    app.useGlobalInterceptors(new TransformInterceptor());
+
+    // Health endpoint remains available at /health
+    app.setGlobalPrefix('api', {
+      exclude: ['health'],
+    });
+
+    const port = process.env.PORT
+      ? parseInt(process.env.PORT, 10)
+      : 4000;
+
+    console.log(`🌐 Attempting to listen on port ${port}...`);
+
+    await app.listen(port, '0.0.0.0');
+
+    console.log(`✅ GlobaPay API listening on port ${port}`);
+    console.log(`✅ Health endpoint: /health`);
+  } catch (error) {
+    console.error('\n========================================');
+    console.error('❌ BOOTSTRAP FAILED');
+    console.error('========================================');
+
+    if (error instanceof Error) {
+      console.error('Message:', error.message);
+      console.error('Stack:\n', error.stack);
+    } else {
+      console.error(error);
+    }
+
+    console.error('========================================\n');
+
+    process.exit(1);
+  }
 }
 
 bootstrap();
