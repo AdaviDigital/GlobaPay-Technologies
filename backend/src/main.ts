@@ -63,9 +63,16 @@ async function bootstrap() {
       exclude: ['health'],
     });
 
-    const port = process.env.PORT
-      ? parseInt(process.env.PORT, 10)
-      : 4000;
+    // -----------------------------------------
+    // Render Port Debugging
+    // -----------------------------------------
+    const port = Number(process.env.PORT || 4000);
+
+    console.log('========================================');
+    console.log('PORT env:', process.env.PORT);
+    console.log('Listening on:', port);
+    console.log('NODE_ENV:', process.env.NODE_ENV);
+    console.log('========================================');
 
     console.log(`🌐 Attempting to listen on port ${port}...`);
 
