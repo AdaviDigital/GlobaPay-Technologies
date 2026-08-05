@@ -56,7 +56,7 @@ export default function LandingPage() {
           </h1>
           <p className="mt-6 text-lg text-muted">
             GlobaPay brings fiat wallets, cross-border transfers, and crypto trading into a single
-            platform, built for people and businesses who don't stop at one currency.
+            platform, built for people and businesses who don&apos;t stop at one currency.
           </p>
           <div className="mt-8 flex items-center gap-4">
             <Link href="/register">
@@ -90,7 +90,7 @@ export default function LandingPage() {
 
       <footer className="border-t border-border">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-8 text-sm text-muted">
-          <span>© {new Date().getFullYear()} GlobaPay</span>
+          <span>© {new Date().getFullYear()} GlobaPay. Powered by Adavi Digital</span>
           <span>Secured with end-to-end encryption</span>
         </div>
       </footer>
