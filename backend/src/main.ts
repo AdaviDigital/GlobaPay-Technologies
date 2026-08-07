@@ -1,15 +1,23 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, VersioningType } from '@nestjs/common';
+import {
+  ValidationPipe,
+  VersioningType,
+} from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
+
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { validateEnv } from './config/validate-env';
 
-// Validate environment variables before starting the application
+
+// ---------------------------------------------------------
+// Validate environment variables before starting the app
+// ---------------------------------------------------------
 validateEnv(process.env);
+
 
 async function bootstrap() {
   try {
@@ -24,10 +32,20 @@ async function bootstrap() {
 
     console.log('✅ Nest application created.');
 
-    // Trust Render/Railway reverse proxy
+
+    // ---------------------------------------------------------
+    // Render / Railway / reverse proxy configuration
+    // ---------------------------------------------------------
     app.set('trust proxy', 1);
 
-    const configuredOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:3000')
+
+    // ---------------------------------------------------------
+    // CORS
+    // ---------------------------------------------------------
+    const configuredOrigins = (
+      process.env.CORS_ORIGINS ??
+      'http://localhost:3000'
+    )
       .split(',')
       .map((origin) => origin.trim())
       .filter(Boolean);
@@ -37,13 +55,29 @@ async function bootstrap() {
       credentials: true,
     });
 
+
+    // ---------------------------------------------------------
+    // Security
+    // ---------------------------------------------------------
     app.use(helmet());
 
+
+    // ---------------------------------------------------------
+    // API versioning
+    //
+    // IMPORTANT:
+    // URI versioning applies to normal API routes.
+    // The health endpoint is marked VERSION_NEUTRAL below.
+    // ---------------------------------------------------------
     app.enableVersioning({
       type: VersioningType.URI,
       defaultVersion: '1',
     });
 
+
+    // ---------------------------------------------------------
+    // Validation
+    // ---------------------------------------------------------
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -55,17 +89,45 @@ async function bootstrap() {
       }),
     );
 
-    app.useGlobalFilters(new HttpExceptionFilter());
-    app.useGlobalInterceptors(new TransformInterceptor());
 
-    // Health endpoint remains available at /health
+    // ---------------------------------------------------------
+    // Global filters/interceptors
+    // ---------------------------------------------------------
+    app.useGlobalFilters(
+      new HttpExceptionFilter(),
+    );
+
+    app.useGlobalInterceptors(
+      new TransformInterceptor(),
+    );
+
+
+    // ---------------------------------------------------------
+    // Global API prefix
+    //
+    // Normal routes:
+    // /api/v1/auth/login
+    // /api/v1/wallets
+    // /api/v1/transfers
+    //
+    // Health:
+    // /health
+    // ---------------------------------------------------------
     app.setGlobalPrefix('api', {
-      exclude: ['health'],
+      exclude: [
+        {
+          path: 'health',
+          method: undefined,
+        },
+      ],
     });
 
-    // -----------------------------------------
-    // Render Port Debugging
-    // -----------------------------------------
+
+    // ---------------------------------------------------------
+    // PORT
+    // Render supplies PORT automatically.
+    // Locally defaults to 4000.
+    // ---------------------------------------------------------
     const port = Number(process.env.PORT || 4000);
 
     console.log('========================================');
@@ -76,10 +138,18 @@ async function bootstrap() {
 
     console.log(`🌐 Attempting to listen on port ${port}...`);
 
+
+    // ---------------------------------------------------------
+    // Listen on all interfaces
+    // Required for Render/Docker
+    // ---------------------------------------------------------
     await app.listen(port, '0.0.0.0');
+
 
     console.log(`✅ GlobaPay API listening on port ${port}`);
     console.log(`✅ Health endpoint: /health`);
+    console.log(`✅ API base: /api/v1`);
+    
   } catch (error) {
     console.error('\n========================================');
     console.error('❌ BOOTSTRAP FAILED');
