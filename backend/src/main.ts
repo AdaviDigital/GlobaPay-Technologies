@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import {
+  RequestMethod,
   ValidationPipe,
   VersioningType,
 } from '@nestjs/common';
@@ -116,9 +117,9 @@ async function bootstrap() {
     app.setGlobalPrefix('api', {
       exclude: [
         {
-          path: 'health',
-          method: undefined,
-        },
+         path: 'health',
+         method: RequestMethod.GET,
+       },
       ],
     });
 
